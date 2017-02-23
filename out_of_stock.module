@@ -1,0 +1,356 @@
+<?php
+
+
+function out_of_stock_menu() {
+  $items = array();
+  $items['admin/commerce/pre-order-card'] = array(
+    'title' => 'Pre-order card',
+    'type' => MENU_NORMAL_ITEM,
+    'page callback' => 'out_of_stock_view',
+    'access arguments' => array('administer stock'),
+    'weight' => 1,
+  );
+  $items['out-of-stock/ajax'] = array(
+    'page callback' => 'out_of_stock_ajax_callback',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/*
+ * Implements hook_permission
+ */
+function out_of_stock_permission() {
+  return array(
+    'administer stock' => array(
+      'title' => t('Administer pre-paid card'),
+      'description' => t('show data'),
+    ),
+  );
+}
+
+
+function out_of_stock_form_alter(&$form, &$form_state, $form_id) {
+  $pos = strpos($form_id, 'commerce_cart_add_to_cart_form_');
+  if($pos !== false) {
+    if(!empty($form['product_id']['#value'])){
+      $product_id = $form['product_id']['#value'];
+      $prod = commerce_product_load($product_id);
+      if(isset($prod->field_out_of_stock['und'][0]['value']) && $prod->field_out_of_stock['und'][0]['value'] == 1){
+        //dpm($form);
+        //dpm($prod);
+        unset($form['quantity']);
+        unset($form['submit']);
+        $product_id = $form['product_id']['#value'];
+        unset($form['product_id']);
+
+        $link_button = l(t('Pre-order'), 'out-of-stock/ajax', array('attributes' => array('data-product' => array($product_id), 'class' => array('click-pre-order use-ajax'))));
+        $link = '<span class="label-stock">'.t('Out of Stock').'</span>'.$link_button;
+        $form['out_of_stock'] = array(
+          '#prefix' => '<div class="out-of-stock">',
+          '#markup' => $link,
+          '#suffix' => '</div>',
+        );
+      }
+    }
+
+  }
+}
+
+
+function out_of_stock_theme(){
+  return array(
+    //main page about
+    'out_of_stock' => array(
+      'template' => 'out_of_stock',
+    ),
+  );
+}
+
+
+//описание функции показывает этот блок в спике всех блоков
+function out_of_stock_block_info() {
+  $blocks['out_of_stock'] = array(
+    'info' => t('Out of stock modal window'),
+  );
+  return $blocks;
+}
+//функция отображения блока
+function out_of_stock_block_view($delta = '') {
+  $block = array();
+  switch ($delta) {
+    case 'out_of_stock':
+      drupal_add_library('system', 'jquery.cookie');
+      drupal_add_js(drupal_get_path('module', 'out_of_stock') . '/out_of_stock.js');
+      $form = drupal_get_form('out_of_stock_form');
+      $render_form = drupal_render($form);
+
+
+      $param = array(
+        'title' => t('Pre-order card'),
+        'form' => $render_form,
+      );
+      $block['content'] = theme('out_of_stock', $param);
+
+      break;
+  }
+  return $block;
+}
+
+
+
+
+/**
+ * Form builder
+ */
+function out_of_stock_form($form, &$form_state) {
+
+  $form['#prefix'] = '<div id="modal-form">';
+  $form['#suffix'] = '</div>';
+
+  $form['description'] = array(
+    '#prefix' => '<p>',
+    '#suffix' => '</p>',
+    '#markup' => t('We don’t have this card in stock at the moment! Please leave your details and we will notify you, when it is available. You will here from us soon!'),
+  );
+
+  $form['title'] = array(
+    '#prefix' => '<h2>',
+    '#suffix' => '</h2>',
+    '#markup' => t('How do you want to be notified?'),
+  );
+
+  $form['by_email'] = array(
+    '#type' =>'checkbox',
+    '#title' => t('by Email'),
+  );
+
+  $form['email_value'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Email'),
+    '#title_display' => 'invisible',
+    '#size' => 60,
+    '#maxlength' => 128,
+    '#attributes' => array('placeholder' => t('Your e-mail address')),
+    '#states' => array(
+      'visible' => array(
+        ':input[name="by_email"]' => array('checked' => TRUE),
+      ),
+    ),
+  );
+
+  $form['by_phone'] = array(
+    '#type' =>'checkbox',
+    '#title' => t('by Telephone'),
+  );
+
+  $form['phone_value'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Phone'),
+    '#title_display' => 'invisible',
+    '#size' => 60,
+    '#maxlength' => 128,
+    '#attributes' => array('placeholder' => t('Your phone')),
+    '#states' => array(
+      'visible' => array(
+        ':input[name="by_phone"]' => array('checked' => TRUE),
+      ),
+    ),
+  );
+
+  /*
+  $form['product_id'] = array(
+    '#type' => 'hidden',
+    '#value' => 0,
+  );*/
+
+  $form['subs'] = array(
+    '#type' =>'checkbox',
+    '#title' => t('Stay informed about Discounts, New products and Special offers! Subscribe!'),
+    '#required' => TRUE,
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Keep me informed'),
+    '#attributes' => array('class' => array('orange-button')),
+    '#ajax' => array(
+      'callback' => 'out_of_stock_ajax_submit',
+      'wrapper' => 'modal-form',
+      'method' => 'replace',
+      'effect' => 'fade',
+    ),
+  );
+
+  return $form;
+
+}
+
+function _add_pre_order($prod_id, $type, $data){
+  /*$type - 1 - phone
+          - 0 - email
+          */
+
+  $name = '';
+  if($prod = commerce_product_load($prod_id))
+    $name = $prod->title;
+
+  $transaction = db_transaction();
+  try {
+    $country = geoip_country_name();
+    $id = db_insert('out_of_stock')
+      ->fields(array(
+        'product_id' => $prod_id,
+        'name' => $name,
+        'type' => $type,
+        'data' => $data,
+        'country' => !empty($country) ? $country : 'NAN',
+        'ip' => geoip_ip_address(),
+        'created' => REQUEST_TIME,
+      ))
+      ->execute();
+    //return $id;
+  } catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('Open account page', $e);
+  }
+}
+
+
+/**
+ * Ajax callback function.
+ */
+function out_of_stock_ajax_submit($form, $form_state) {
+  $flag = false;
+  if(!empty($form_state['values']['subs'])){
+    $flag = true;
+  }
+
+  $prod_id = 0;
+  if (!empty($_COOKIE['product_id']))
+    $prod_id = filter_xss($_COOKIE['product_id']);
+  
+  $phone = '';
+  if(!empty($form_state['values']['by_phone'])){
+    if(!empty($form_state['values']['phone_value'])) {
+      $phone = filter_xss($form_state['values']['phone_value']);
+    }else
+      form_set_error('phone_value', t('Please fill telephone field'));
+  }
+
+  $email = '';
+  if(!empty($form_state['values']['by_email'])){
+    if(!empty($form_state['values']['email_value'])) {
+      $email = filter_xss($form_state['values']['email_value']);
+      if (!valid_email_address($email)) {
+        $email = '';
+        form_set_error('email_value', t('The email address appears to be invalid.'));
+      }
+    }else
+      form_set_error('email_value', t('Please fill email field'));
+  }
+
+  if(empty($phone) && empty($email)){
+    form_set_error('email_value', t('Please select type and fill your data'));
+  }else{
+    $query = '';
+    if(!empty($phone) && $flag){
+      _add_pre_order($prod_id, 1, $phone);
+    }
+    if(!empty($email) && $flag){
+      _add_pre_order($prod_id, 0, $email);
+    }
+
+    if(!empty($form_state['values']['subs'])) {
+      unset($form['description']);
+      unset($form['title']);
+      unset($form['by_email']);
+      unset($form['email_value']);
+      unset($form['by_phone']);
+      unset($form['phone_value']);
+      unset($form['subs']);
+      unset($form['submit']);
+
+      $form['title'] = array(
+        '#prefix' => '<p class="thank-you">',
+        '#suffix' => '</p>',
+        '#markup' => t('Thank you for your interest!'),
+      );
+      $form['close'] = array(
+        '#markup' => '<div class="close-form"><a href="#" data-dismiss="modal">' . t('Close') . '</a></div>',
+      );
+    }
+
+  }
+  return $form;
+}
+
+/*
+ * ajax callback fore rechange form
+ */
+function out_of_stock_ajax_callback($type = 'ajax') {
+  if ($type == 'ajax') {
+    $form = drupal_get_form('out_of_stock_form');
+    $render_form = drupal_render($form);
+    $commands[] = ajax_command_replace('#modal-form', $render_form);
+    $page = array('#type' => 'ajax', '#commands' => $commands);
+    ajax_deliver($page);
+  }
+}
+
+
+
+function out_of_stock_view(){
+  $header = array(
+    array('data' => t('Id')),
+    array('data' => t('Product id')),
+    array('data' => t('Name')),
+    array('data' => t('Type')),
+    array('data' => t('Data')),
+    array('data' => t('Country')),
+    array('data' => t('Ip')),
+    array('data' => t('Created')),
+  );
+
+  // We are extending the PagerDefault class here.
+  // It has a default of 10 rows per page.
+  // The extend('PagerDefault') part here does all the magic.
+  $query = db_select('out_of_stock', 'g')->extend('PagerDefault');
+  $query->fields('g', array('id', 'product_id', 'name', 'type', 'data', 'country', 'ip', 'created'))
+    ->orderBy('created', 'DESC');
+
+  //$result = $query->execute();
+  $result = $query
+    ->limit(50)
+    //->orderBy('g.created')
+    ->execute();
+  if(!empty($result)) {
+
+    $rows = array();
+    foreach ($result as $record) {
+      //$rows[] = array('data' => (array) $record);
+      $rows[] = array('data' => array(
+        $record->id,
+        $record->product_id,
+        $record->name,
+        $record->type,
+        $record->data,
+        $record->country,
+        $record->ip,
+        date('d-m-Y H:i:s', $record->created),
+      ),
+      );
+    }
+
+    $build['pager_table'] = array(
+      '#theme' => 'table',
+      '#header' => $header,
+      '#rows' => $rows,
+      '#empty' => t('There are no date formats found in the db'),
+    );
+    //$page = theme('table', array('header' => $header, 'rows' => $rows, 'sticky' => FALSE));
+    $build['pager_pager'] = array('#theme' => 'pager');
+  }
+  return $build;
+}
